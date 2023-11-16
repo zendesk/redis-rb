@@ -48,4 +48,81 @@ class TestClusterClientTransactions < Minitest::Test
       assert_nil(redis.get("key#{i}"))
     end
   end
+
+  def test_cluster_client_can_watch_and_multi
+    redis.mset('{slot}key1', 'value1', '{slot}key2', 'value2')
+    actual = redis.watch(['{slot}key1', '{slot}key2']) do
+      old_value1, old_value2 = redis.mget('{slot}key1', '{slot}key2')
+      redis.multi do |r|
+        r.set('{slot}key1', old_value2)
+        r.set('{slot}key2', old_value1)
+      end
+    end
+
+    assert_equal(%w[OK OK], actual)
+    assert_equal(%w[value2 value1], redis.mget('{slot}key1', '{slot}key2'))
+  end
+
+  def test_cluster_client_unwatches_on_error_in_watch
+    the_exception = Class.new(StandardError)
+    assert_raises(the_exception) do
+      redis.watch(['{slot}key1', '{slot}key2']) do
+        raise the_exception
+      end
+    end
+
+    # The client is now usable for other slots.
+    assert_equal('OK', redis.set('{otherslot}key3', 'othervalue'))
+  end
+
+  def test_cluster_client_unwatches_on_error_in_multi
+    the_exception = Class.new(StandardError)
+    $commands.clear
+    redis.set('{slot}key1', 'something')
+    assert_raises(the_exception) do
+      redis.watch(['{slot}key1', '{slot}key2']) do
+        redis.multi do |txn|
+          txn.set('{slot}key1', 'something_else')
+          raise the_exception
+        end
+      end
+    end
+
+    assert_equal('something', redis.get('{slot}key1'))
+    # The client is now usable for other slots.
+    assert_equal('OK', redis.set('{otherslot}key3', 'othervalue'))
+  end
+
+  def test_cluster_client_can_unwatch
+    redis.watch(['{slot}key1', '{slot}key2']) do
+      redis.unwatch
+    end
+    # The client is now usable for other slots.
+    assert_equal('OK', redis.set('{otherslot}key3', 'othervalue'))
+  end
+
+  def test_cluster_client_is_pinned_in_watch_block
+    assert_raises(Redis::Cluster::TransactionConsistencyError) do
+      redis.watch(['{slot}key1']) do
+        redis.get('{otherslot}key3')
+      end
+    end
+  end
+
+  def test_cluster_client_watch_modified_in_thread
+    redis.mset('{slot}key1', 'value1', '{slot}key2', 'value2')
+    actual = redis.watch(['{slot}key1', '{slot}key2']) do
+      old_value1, old_value2 = redis.mget('{slot}key1', '{slot}key2')
+
+      Thread.new { build_another_client.set('{slot}key1', 'from_another_thread') }.join
+
+      redis.multi do |r|
+        r.set('{slot}key1', old_value2)
+        r.set('{slot}key2', old_value1)
+      end
+    end
+
+    assert_nil(actual)
+    assert_equal(%w[from_another_thread value2], redis.mget('{slot}key1', '{slot}key2'))
+  end
 end
