@@ -41,6 +41,54 @@ class Redis
     class TransactionConsistencyError < BaseError
     end
 
+    class ConnectionCommands
+      include Redis::Commands
+
+      class ErrorTranslatorDelegator < SimpleDelegator
+        def initialize(client, conn)
+          @client = client
+          super(conn)
+        end
+
+        def call_v(command, &block)
+          super
+        rescue ::RedisClient::Error => error
+          Redis::Cluster::Client.translate_error!(error)
+        end
+
+        def blocking_call_v(timeout, command, &block)
+          super
+        rescue ::RedisClient::Error => error
+          Redis::Cluster::Client.translate_error!(error)
+        end
+      end
+
+      def initialize(client, conn)
+        @client = client
+        @conn = ErrorTranslatorDelegator.new(client, conn)
+      end
+
+      def synchronize
+        yield @conn
+      end
+
+      def pipelined
+        @conn.pipelined do |pipe|
+          yield Redis::PipelinedConnection.new(ErrorTranslatorDelegator.new(@client, pipe))
+        end
+      end
+
+      private
+
+      def send_command(command, &block)
+        @conn.call_v(command, &block)
+      end
+
+      def send_blocking_command(command, timeout, &block)
+        @conn.blocking_call_v(timeout, command, &block)
+      end
+    end
+
     def connection
       raise NotImplementedError, "Redis::Cluster doesn't implement #connection"
     end
@@ -91,6 +139,16 @@ class Redis
       end
 
       send_command([:cluster, subcommand] + args, &block)
+    end
+
+    def with(key: nil, write: true, retry_count: 0)
+      return super unless key
+
+      synchronize do |client|
+        client.with(key: key, write: write, retry_count: 0) do |conn|
+          yield(ConnectionCommands.new(client, conn))
+        end
+      end
     end
 
     private

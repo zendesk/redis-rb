@@ -91,7 +91,7 @@ class Redis
   end
   alias disconnect! close
 
-  def with
+  def with(*)
     yield self
   end
 
