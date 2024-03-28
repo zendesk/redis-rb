@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "./lib/redis/version"
+require_relative "lib/redis/version"
 
 Gem::Specification.new do |s|
   s.name = "redis"
